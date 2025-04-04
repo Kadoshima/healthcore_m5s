@@ -1,5 +1,6 @@
 #include <M5StickCPlus2.h>
 #include <BluetoothSerial.h>
+#include <ArduinoJson.h>  // JSON形式でデータを送信するために追加
 
 // BPM計算用の変数
 #define SAMPLE_RATE 50                // サンプリングレート（Hz）
@@ -10,6 +11,9 @@
 // Bluetooth設定
 BluetoothSerial SerialBT;
 bool btConnected = false;
+#define BT_DEVICE_NAME "M5StickCPlus2-Gait"  // Bluetooth デバイス名
+#define BT_SEND_INTERVAL_BPM 500      // BPMデータ送信間隔（ms）
+#define BT_SEND_INTERVAL_RAW 100      // 生データ送信間隔（ms）
 
 // IMU 変数
 float accX = 0.0F;
@@ -32,7 +36,6 @@ float currentBPM = 0.0;               // 現在のBPM
 #define GRAPH_Y_POS 60
 
 // データ送信用
-#define DATA_INTERVAL 100             // データ送信間隔（ms）
 unsigned long lastDataTime = 0;       // 最後のデータ送信時間
 
 // デバッグ用
@@ -96,7 +99,7 @@ void setup() {
   
   // Bluetooth初期化
   Serial.println("Initializing Bluetooth...");
-  SerialBT.begin("M5StickCPlus2-Gait");
+  SerialBT.begin(BT_DEVICE_NAME);
   SerialBT.register_callback(btCallback);
   Serial.println("Bluetooth Initialized.");
   
@@ -216,7 +219,8 @@ void loop() {
       }
       
       // Bluetoothデータ送信
-      if (currentTime - lastDataTime > DATA_INTERVAL && btConnected) {
+      unsigned long interval = sendRawData ? BT_SEND_INTERVAL_RAW : BT_SEND_INTERVAL_BPM;
+      if (currentTime - lastDataTime > interval && btConnected) {
         sendData();
         lastDataTime = currentTime;
       }
@@ -423,19 +427,59 @@ void drawGraph() {
 // データ送信
 void sendData() {
   if (btConnected) {
+    // 現在の時間を取得
+    unsigned long currentTime = millis();
+    
+    // JSONドキュメントを作成
+    StaticJsonDocument<200> doc;
+    
+    // 共通フィールド
+    doc["device"] = "M5StickCPlus2";
+    doc["timestamp"] = currentTime;
+    
     if (sendRawData) {
       // 生の加速度データを送信
-      String dataString = String("RAW,") + String(millis()) + "," + 
-                          String(accX, 3) + "," + String(accY, 3) + "," + String(accZ, 3);
-      SerialBT.println(dataString);
-      Serial.print("BT Send: ");
-      Serial.println(dataString);
+      doc["type"] = "raw";
+      JsonObject data = doc.createNestedObject("data");
+      data["accX"] = accX;
+      data["accY"] = accY;
+      data["accZ"] = accZ;
+      data["magnitude"] = sqrt(accX*accX + accY*accY + accZ*accZ);
+      
+      // JSONをシリアルに送信
+      String jsonString;
+      serializeJson(doc, jsonString);
+      SerialBT.println(jsonString);
+      
+      if (currentTime - lastDebugTime > DEBUG_INTERVAL) {
+        Serial.print("BT Send RAW: ");
+        Serial.println(jsonString);
+      }
     } else {
       // 解析済みの歩行ピッチデータを送信
-      String dataString = String("BPM,") + String(millis()) + "," + String(currentBPM, 2);
-      SerialBT.println(dataString);
-      Serial.print("BT Send: ");
-      Serial.println(dataString);
+      doc["type"] = "bpm";
+      JsonObject data = doc.createNestedObject("data");
+      data["bpm"] = currentBPM;
+      
+      // 最後のステップ間隔も含める（歩行リズムの安定性評価に有用）
+      if (stepIndex > 0) {
+        int prev = (stepIndex - 1 + 20) % 20;
+        int prevprev = (stepIndex - 2 + 20) % 20;
+        if (stepTimes[prev] > 0 && stepTimes[prevprev] > 0) {
+          unsigned long interval = stepTimes[prev] - stepTimes[prevprev];
+          data["lastInterval"] = interval;
+        }
+      }
+      
+      // JSONをシリアルに送信
+      String jsonString;
+      serializeJson(doc, jsonString);
+      SerialBT.println(jsonString);
+      
+      if (currentTime - lastDebugTime > DEBUG_INTERVAL) {
+        Serial.print("BT Send BPM: ");
+        Serial.println(jsonString);
+      }
     }
   }
 }
